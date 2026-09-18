@@ -1,0 +1,24 @@
+# Zephyr / CMake build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.ninja
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+# VS Code local files
+.vscode/*.log
+.vscode/*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db

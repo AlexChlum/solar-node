@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Zephyr: Build ESP32 ProCPU",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "west",
+        "build",
+        "-p",
+        "-b",
+        "esp32_devkitc/esp32/procpu",
+        "."
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Zephyr: Flash ESP32 ProCPU",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "west",
+        "flash",
+        "--build-dir",
+        "build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}

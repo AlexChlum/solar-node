@@ -1,0 +1,31 @@
+#include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/pinctrl/esp32-pinctrl.h>
+
+/ {
+    aliases {
+        led-strip = &strip0;
+    };
+};
+
+&i2s0_default {
+    group1 {
+        pinmux = <I2S0_O_WS_GPIO33>,
+                 <I2S0_O_BCK_GPIO32>,
+                 <I2S0_O_SD_GPIO2>,
+                 <I2S0_I_SD_GPIO17>;
+    };
+};
+
+&i2s0 {
+    status = "okay";
+
+    strip0: ws2812@0 {
+        compatible = "worldsemi,ws2812-i2s";
+        reg = <0>;
+        chain-length = <1>;
+        color-mapping = <LED_COLOR_ID_GREEN
+                         LED_COLOR_ID_RED
+                         LED_COLOR_ID_BLUE>;
+        reset-delay = <500>;
+    };
+};
