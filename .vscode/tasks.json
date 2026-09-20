@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Zephyr: Build ESP32 ProCPU",
+      "label": "Zephyr: Build ESP32 ProCPU (pristine)",
       "type": "shell",
       "command": ".\\.venv\\Scripts\\python.exe",
       "args": [
@@ -10,6 +10,27 @@
         "west",
         "build",
         "-p",
+        "-b",
+        "esp32_devkitc/esp32/procpu",
+        "."
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Zephyr: Build ESP32 ProCPU (standard)",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "west",
+        "build",
         "-b",
         "esp32_devkitc/esp32/procpu",
         "."
@@ -43,6 +64,40 @@
           "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
         }
       },
+      "problemMatcher": []
+    },
+    {
+      "label": "Zephyr: Monitor Serial (COM5 115200)",
+      "type": "shell",
+      "command": ".\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "serial.tools.miniterm",
+        "COM5",
+        "115200"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "isBackground": false,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Zephyr: Flash and Connect ESP32 ProCPU",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Zephyr: Flash ESP32 ProCPU",
+        "Zephyr: Monitor Serial (COM5 115200)"
+      ],
       "problemMatcher": []
     }
   ]
