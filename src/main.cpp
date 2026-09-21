@@ -1,22 +1,15 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/led_strip.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/net/net_if.h>
-#include <zephyr/net/net_ip.h>
 #include <zephyr/logging/log.h>
+
+#include "wifi_autoconnect.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
-static const struct device *strip = DEVICE_DT_GET(DT_ALIAS(led_strip));
+static const struct device *const strip = DEVICE_DT_GET(DT_ALIAS(led_strip));
 
-static bool wifi_is_connected(void) {
-    struct net_if *iface = net_if_get_default();
-    if (!iface) {
-        return false;
-    }
-
-    return net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != nullptr;
-}
+static struct led_rgb pixel_buf[4];
 
 int main(void) {
     if (!device_is_ready(strip)) {
@@ -25,40 +18,53 @@ int main(void) {
     }
 
     LOG_INF("=== Solar Node Starting ===");
-    LOG_INF("LED strip ready; WiFi is shell-driven in this build");
-    LOG_INF("Use shell commands:");
-    LOG_INF("  wifi scan");
-    LOG_INF("  wifi connect -s \"<SSID>\" -p \"<PASS>\" -k 1");
+    LOG_INF("LED strip ready; WiFi auto-connect is enabled");
+    LOG_INF("Shell is still available for diagnostics:");
     LOG_INF("  wifi status");
+    LOG_INF("  net iface");
+
+    int auto_connect_ret = wifi_autoconnect_start();
+    if (auto_connect_ret) {
+        LOG_WRN("Auto-connect request failed: %d", auto_connect_ret);
+    }
 
     LOG_INF("LED behavior: blinking GREEN until WiFi connects, then BLUE");
 
-    // 50% brightness colors
-    struct led_rgb off = {.r = 0x00, .g = 0x00, .b = 0x00};
-    struct led_rgb green_half = {.r = 0x00, .g = 0x80, .b = 0x00};
-    struct led_rgb blue_half = {.r = 0x00, .g = 0x00, .b = 0x80};
+    bool blink_on = false;
     bool last_connected = false;
 
     while (1) {
-        bool connected = wifi_is_connected();
+        wifi_autoconnect_poll();
+
+        bool connected = wifi_autoconnect_is_connected();
         if (connected != last_connected) {
-            LOG_INF("WiFi state changed: %s", connected ? "connected" : "disconnected");
             last_connected = connected;
+            blink_on = false;
         }
 
-        struct led_rgb on = connected ? blue_half : green_half;
+        blink_on = !blink_on;
+        if (blink_on) {
+            if (connected) {
+                pixel_buf[0].r = 0x00;
+                pixel_buf[0].g = 0x00;
+                pixel_buf[0].b = 0x80;
+            } else {
+                pixel_buf[0].r = 0x00;
+                pixel_buf[0].g = 0x80;
+                pixel_buf[0].b = 0x00;
+            }
+        } else {
+            pixel_buf[0].r = 0x00;
+            pixel_buf[0].g = 0x00;
+            pixel_buf[0].b = 0x00;
+        }
 
-        int ret = led_strip_update_rgb(strip, &on, 1);
+        int ret = led_strip_update_rgb(strip, pixel_buf, 1);
         if (ret) {
-            LOG_ERR("led_strip_update_rgb(on) failed: %d", ret);
+            LOG_ERR("led_strip_update_rgb(blink) failed: %d", ret);
         }
-        k_msleep(400);
 
-        ret = led_strip_update_rgb(strip, &off, 1);
-        if (ret) {
-            LOG_ERR("led_strip_update_rgb(off) failed: %d", ret);
-        }
-        k_msleep(400);
+        k_msleep(500);
     }
 
     return 0;

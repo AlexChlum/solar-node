@@ -5,4 +5,5 @@ project(solar-node)
 
 target_sources(app PRIVATE 
     src/main.cpp
+    src/wifi_autoconnect.c
 )

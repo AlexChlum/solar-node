@@ -3,7 +3,7 @@
 
 // WiFi Configuration
 #define WIFI_SSID "ChlumNet"
-#define WIFI_PASSWORD "W!f!p@ssword"
+#define WIFI_PASSWORD "W!f!P@ssword"
 
 // MQTT Configuration
 #define MQTT_BROKER_HOST "mqtt.local"
