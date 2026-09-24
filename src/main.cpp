@@ -4,6 +4,7 @@
 #include <zephyr/logging/log.h>
 
 #include "wifi_autoconnect.h"
+#include "mqtt_client.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
@@ -28,10 +29,14 @@ int main(void) {
         LOG_WRN("Auto-connect request failed: %d", auto_connect_ret);
     }
 
+    /* Initialize the Solar MQTT helper (stub implementation for now). */
+    solar_mqtt_init();
+
     LOG_INF("LED behavior: blinking GREEN until WiFi connects, then BLUE");
 
     bool blink_on = false;
     bool last_connected = false;
+    bool mqtt_started = false;
 
     while (1) {
         wifi_autoconnect_poll();
@@ -40,6 +45,14 @@ int main(void) {
         if (connected != last_connected) {
             last_connected = connected;
             blink_on = false;
+            if (connected && !mqtt_started) {
+                int rc = solar_mqtt_start();
+                if (rc == 0) {
+                    mqtt_started = true;
+                } else {
+                    LOG_WRN("MQTT client failed to start: %d", rc);
+                }
+            }
         }
 
         blink_on = !blink_on;
