@@ -78,7 +78,7 @@ solar-node/
 - **Battery voltage input:** ADC1 channel 6 (IO34/J3), divider ratio 5.865×
 - **Battery chemistry:** Lead-Acid / AGM
 - **MOSFET output pin:** TBD — likely IO26, IO25, or IO4 (confirm before Phase 2)
-- **DHT22 data pin:** TBD — likely IO26, IO25, or IO4 (confirm before Phase 1)
+- **DHT22 data pin:** IO26 (gpio0, pin 26) — confirmed and implemented in Phase 1
 
 ---
 
@@ -140,26 +140,30 @@ Each phase is independently buildable and testable. Complete and verify each pha
 Zephyr has a built-in `aosong,dht22` sensor driver — no third-party library required.
 
 **Checklist:**
-- [ ] Add to `prj.conf`: `CONFIG_DHT=y`
-- [ ] Add DHT22 device node to `app.overlay`:
+- [x] Add to `prj.conf`: `CONFIG_DHT=y`
+- [x] Add DHT22 device node to `app.overlay`:
   ```dts
   dht22: dht22 {
-      compatible = "aosong,dht22";
-      dio-gpios = <&gpio0 PIN GPIO_ACTIVE_HIGH>;
+      compatible = "aosong,dht";   /* family compatible; dht22 property selects DHT22 variant */
+      dio-gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+      dht22;
+      status = "okay";
   };
   ```
-- [ ] Create `src/dht_sensor.h` and `src/dht_sensor.c`:
+- [x] Create `src/dht_sensor.h` and `src/dht_sensor.c`:
   - `dht_sensor_init()` — validates device ready
   - `dht_sensor_read(float *temp_c, float *humidity_pct)` — calls `sensor_sample_fetch()` + `sensor_channel_get(SENSOR_CHAN_AMBIENT_TEMP)` and `SENSOR_CHAN_HUMIDITY`
-- [ ] Add `src/dht_sensor.c` to `CMakeLists.txt`
-- [ ] Call `dht_sensor_read()` in `mqtt_worker` and pass values into `publish_telemetry()`
-- [ ] Add HA Discovery on CONNACK for:
+- [x] Add `src/dht_sensor.c` to `CMakeLists.txt`
+- [x] Call `dht_sensor_read()` in `mqtt_worker` and pass values into `publish_telemetry()`
+- [x] Add HA Discovery on CONNACK for:
   - Temperature: `device_class: temperature`, `unit_of_measurement: °C`, topic `solar_node/sensor/temperature/state`
   - Humidity: `device_class: humidity`, `unit_of_measurement: %`, topic `solar_node/sensor/humidity/state`
 
 **Note on noise:** DHT22 1-wire can be unreliable near switching regulators or MOSFET drivers. If readings are erratic, consider switching to an SHT31 over I2C (I2C is already enabled in `prj.conf` and `app.overlay`).
 
-**Verification:** HA shows Temperature and Humidity entities under Solar Node device, updating every 60 s
+**Key lesson (captured for future agents):** In Zephyr 4.4.0 the DHT family uses `compatible = "aosong,dht"` with a `dht22;` boolean property. The `dio-gpios` flags **must** be `(GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)` — `GPIO_ACTIVE_LOW` because the driver asserts "active" to pull the line LOW for the 18 ms start signal; `GPIO_OPEN_DRAIN` because the pin must release to the external pull-up rather than drive HIGH. Using `GPIO_ACTIVE_HIGH` produces a single blip and no sensor response.
+
+**Verification:** ✅ HA shows Temperature and Humidity entities under Solar Node device, updating every 60 s
 
 ---
 
@@ -271,6 +275,6 @@ Note: SoC accuracy is best on resting voltage (no charge/discharge current). Rea
 
 ---
 
-**Last Updated:** 2026-10-02
-**Working Features:** WiFi auto-connect, dual ADC voltage reading (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, RSSI)
-**Next Phase:** Phase 0 — Code Cleanup & Refactor
+**Last Updated:** 2026-10-03
+**Working Features:** WiFi auto-connect, dual ADC voltage reading (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity)
+**Next Phase:** Phase 2 — MOSFET/LED Switch Control via MQTT

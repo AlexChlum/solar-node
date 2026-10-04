@@ -7,4 +7,5 @@ target_sources(app PRIVATE
     src/main.cpp
     src/wifi_autoconnect.c
     src/mqtt_client.c
+    src/dht_sensor.c
 )

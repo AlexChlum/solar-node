@@ -1,10 +1,18 @@
 #include <zephyr/dt-bindings/led/led.h>
 #include <zephyr/dt-bindings/pinctrl/esp32-pinctrl.h>
 #include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
 	aliases {
 		led-strip = &strip0;
+	};
+
+	dht22: dht22 {
+		compatible = "aosong,dht";
+		dio-gpios = <&gpio0 26 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
+		dht22;
+		status = "okay";
 	};
 
 	/* User node mapping for C code access via ADC_DT_SPEC_GET_BY_NAME */

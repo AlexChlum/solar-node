@@ -1,12 +1,15 @@
-/* Full MQTT client: plain (non-TLS) connection with RSSI, Solar V, and Battery V telemetry.
+/* Full MQTT client: plain (non-TLS) connection with RSSI, Solar V, Battery V,
+ * Temperature, and Humidity telemetry.
  * - resolves MQTT_BROKER_HOST
  * - connects to broker, sets LWT to solar_node/availability (offline retained)
  * - reads ADC channels for solar (J2) and battery (J3) with voltage divider math
+ * - reads DHT22 on IO26 for temperature and humidity
  */
 
 #include "mqtt_client.h"
 #include "config.h"
 #include "wifi_autoconnect.h"
+#include "dht_sensor.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -198,7 +201,8 @@ static void mqtt_publish_str(const char *topic_str, const char *payload, bool re
 	}
 }
 
-static void publish_telemetry(float solar_v, float battery_v)
+static void publish_telemetry(float solar_v, float battery_v,
+			      bool dht_ok, float temp_c, float humidity_pct)
 {
 	char payload[32];
 
@@ -215,6 +219,15 @@ static void publish_telemetry(float solar_v, float battery_v)
 	/* 3. Battery Voltage */
 	snprintf(payload, sizeof(payload), "%.2f", battery_v);
 	mqtt_publish_str("solar_node/sensor/battery_voltage/state", payload, false);
+
+	/* 4 & 5. Temperature and Humidity (skipped if DHT22 read failed) */
+	if (dht_ok) {
+		snprintf(payload, sizeof(payload), "%.1f", temp_c);
+		mqtt_publish_str("solar_node/sensor/temperature/state", payload, false);
+
+		snprintf(payload, sizeof(payload), "%.1f", humidity_pct);
+		mqtt_publish_str("solar_node/sensor/humidity/state", payload, false);
+	}
 }
 
 static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_evt *evt)
@@ -262,9 +275,37 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 				"\"unique_id\":\"solar_node_battery_v\","
 				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
 
+			static const char disc_temp[] =
+				"{\"name\":\"Temperature\","
+				"\"state_topic\":\"solar_node/sensor/temperature/state\","
+				"\"unit_of_measurement\":\"°C\","
+				"\"device_class\":\"temperature\","
+				"\"suggested_display_precision\":1,"
+				"\"value_template\":\"{{ value }}\","
+				"\"unique_id\":\"solar_node_temp\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
+			static const char disc_humidity[] =
+				"{\"name\":\"Humidity\","
+				"\"state_topic\":\"solar_node/sensor/humidity/state\","
+				"\"unit_of_measurement\":\"%\","
+				"\"device_class\":\"humidity\","
+				"\"suggested_display_precision\":1,"
+				"\"value_template\":\"{{ value }}\","
+				"\"unique_id\":\"solar_node_humidity\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
+			/* Yield between each discovery publish — rapid back-to-back sends
+			 * exhaust the TCP TX buffers and cause the broker to drop the connection. */
 			mqtt_publish_str("homeassistant/sensor/solar_node/rssi/config", disc_rssi, true);
+			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/solar_voltage/config", disc_solar, true);
+			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/battery_voltage/config", disc_battery, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/sensor/solar_node/temperature/config", disc_temp, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/sensor/solar_node/humidity/config", disc_humidity, true);
 
 		} else {
 			LOG_WRN("MQTT CONNACK failed (%d) rc=%d", evt->result, evt->param.connack.return_code);
@@ -336,6 +377,9 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 			if (k_sem_take(&scan_sem, K_SECONDS(10)) != 0) {
 				LOG_WRN("WiFi scan timed out");
 			}
+			/* ESP32 WiFi ISRs run above RTOS IRQ lock level; wait for them to settle
+			 * before the DHT22 1-wire read or timing errors cause EIO. */
+			k_msleep(500);
 		}
 
 		/* Read Analog Voltages */
@@ -352,8 +396,13 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 			LOG_ERR("Failed to read Battery Voltage: %d", err);
 		}
 
+		/* Read DHT22 Temperature & Humidity */
+		float temp_c = 0.0f;
+		float humidity_pct = 0.0f;
+		bool dht_ok = (dht_sensor_read(&temp_c, &humidity_pct) == 0);
+
 		/* Publish all gathered telemetry */
-		publish_telemetry(solar_v, battery_v);
+		publish_telemetry(solar_v, battery_v, dht_ok, temp_c, humidity_pct);
 
 		/* Publish cycle every 60 seconds */
 		k_msleep(60000);
@@ -398,6 +447,8 @@ void solar_mqtt_init(void)
 	if (adc_err < 0) {
 		LOG_ERR("ADC battery channel setup failed (%d)", adc_err);
 	}
+
+	dht_sensor_init();
 
 	/* Register scan callbacks */
 	net_mgmt_init_event_callback(&scan_cb, scan_event_cb,
