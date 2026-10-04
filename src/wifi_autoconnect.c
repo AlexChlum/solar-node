@@ -1,7 +1,5 @@
 #include "wifi_autoconnect.h"
 #include "config.h"
-#include "wifi_autoconnect.h"
-#include "config.h"
 
 #include <errno.h>
 #include <string.h>

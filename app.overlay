@@ -1,31 +1,62 @@
 #include <zephyr/dt-bindings/led/led.h>
 #include <zephyr/dt-bindings/pinctrl/esp32-pinctrl.h>
+#include <zephyr/dt-bindings/adc/adc.h>
 
 / {
-    aliases {
-        led-strip = &strip0;
-    };
+	aliases {
+		led-strip = &strip0;
+	};
+
+	/* User node mapping for C code access via ADC_DT_SPEC_GET_BY_NAME */
+	zephyr,user {
+		io-channels = <&adc0 7>, <&adc0 6>;
+		io-channel-names = "SOLAR_V", "BATTERY_V";
+	};
 };
 
 &i2s0_default {
-    group1 {
-        pinmux = <I2S0_O_WS_GPIO33>,
-                 <I2S0_O_BCK_GPIO32>,
-                 <I2S0_O_SD_GPIO2>,
-                 <I2S0_I_SD_GPIO17>;
-    };
+	group1 {
+		pinmux = <I2S0_O_WS_GPIO33>,
+			 <I2S0_O_BCK_GPIO32>,
+			 <I2S0_O_SD_GPIO2>,
+			 <I2S0_I_SD_GPIO17>;
+	};
 };
 
 &i2s0 {
-    status = "okay";
+	status = "okay";
 
-    strip0: ws2812@0 {
-        compatible = "worldsemi,ws2812-i2s";
-        reg = <0>;
-        chain-length = <1>;
-        color-mapping = <LED_COLOR_ID_GREEN
-                         LED_COLOR_ID_RED
-                         LED_COLOR_ID_BLUE>;
-        reset-delay = <500>;
-    };
+	strip0: ws2812@0 {
+		compatible = "worldsemi,ws2812-i2s";
+		reg = <0>;
+		chain-length = <1>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		reset-delay = <500>;
+	};
+};
+
+&adc0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* Solar Panel Voltage: J2 Header -> IO35 (ADC1 Channel 7) */
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	/* Battery Voltage: J3 Header -> IO34 (ADC1 Channel 6) */
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
 };
