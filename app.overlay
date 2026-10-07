@@ -20,12 +20,23 @@
 		io-channels = <&adc0 7>, <&adc0 6>;
 		io-channel-names = "SOLAR_V", "BATTERY_V";
 	};
+
+	/* Pwr 3 (J16) — N-channel MOSFET low-side switch on IO32 (gpio1 pin 0).
+	 * Exposed as a regulator so it is controllable from the shell:
+	 *   regulator enable pwr3
+	 *   regulator disable pwr3 */
+	pwr3: pwr3 {
+		compatible = "regulator-fixed";
+		regulator-name = "pwr3";
+		enable-gpios = <&gpio1 0 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
 };
 
 &i2s0_default {
 	group1 {
-		pinmux = <I2S0_O_WS_GPIO33>,
-			 <I2S0_O_BCK_GPIO32>,
+		pinmux = <I2S0_O_WS_GPIO16>,
+			 <I2S0_O_BCK_GPIO4>,
 			 <I2S0_O_SD_GPIO2>,
 			 <I2S0_I_SD_GPIO17>;
 	};

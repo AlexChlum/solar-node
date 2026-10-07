@@ -10,6 +10,7 @@
 #include "config.h"
 #include "wifi_autoconnect.h"
 #include "dht_sensor.h"
+#include "output_control.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -245,6 +246,23 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 			/* Availability: online (retained) */
 			mqtt_publish_str("solar_node/availability", "online", true);
 
+			/* Subscribe to the switch command topic */
+			static struct mqtt_topic lights_cmd_topic = {
+				.topic = MQTT_UTF8_LITERAL("solar_node/switch/lights/command"),
+				.qos = MQTT_QOS_0_AT_MOST_ONCE,
+			};
+			struct mqtt_subscription_list lights_sub = {
+				.list = &lights_cmd_topic,
+				.list_count = 1,
+				.message_id = 1,
+			};
+			int sub_rc = mqtt_subscribe(&client, &lights_sub);
+			if (sub_rc) {
+				LOG_WRN("mqtt_subscribe(lights command) failed: %d", sub_rc);
+			} else {
+				LOG_INF("Subscribed to solar_node/switch/lights/command");
+			}
+
 			/* Home Assistant Discovery */
 			static const char disc_rssi[] =
 				"{\"name\":\"RSSI\","
@@ -295,6 +313,16 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 				"\"unique_id\":\"solar_node_humidity\","
 				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
 
+			static const char disc_lights[] =
+				"{\"name\":\"Lights\","
+				"\"command_topic\":\"solar_node/switch/lights/command\","
+				"\"state_topic\":\"solar_node/switch/lights/state\","
+				"\"payload_on\":\"ON\","
+				"\"payload_off\":\"OFF\","
+				"\"retain\":true,"
+				"\"unique_id\":\"solar_node_lights\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
 			/* Yield between each discovery publish — rapid back-to-back sends
 			 * exhaust the TCP TX buffers and cause the broker to drop the connection. */
 			mqtt_publish_str("homeassistant/sensor/solar_node/rssi/config", disc_rssi, true);
@@ -306,9 +334,64 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 			mqtt_publish_str("homeassistant/sensor/solar_node/temperature/config", disc_temp, true);
 			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/humidity/config", disc_humidity, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/switch/solar_node/lights/config", disc_lights, true);
+			mqtt_publish_str("solar_node/switch/lights/state", "OFF", true);
 
 		} else {
 			LOG_WRN("MQTT CONNACK failed (%d) rc=%d", evt->result, evt->param.connack.return_code);
+		}
+		break;
+	case MQTT_EVT_PUBLISH:
+		{
+			/* In Zephyr MQTT, payload.data is always NULL on receive.
+			 * The bytes live in the TCP socket buffer and must be read
+			 * with mqtt_read_publish_payload_blocking(). Drain ALL bytes
+			 * regardless of topic to keep the stream in sync. */
+			size_t total_len = evt->param.publish.message.payload.len;
+			char payload_buf[16];
+			size_t read_len = MIN(total_len, sizeof(payload_buf) - 1);
+
+			int bytes_read = mqtt_read_publish_payload_blocking(
+				&client, payload_buf, read_len);
+			if (bytes_read < 0) {
+				LOG_WRN("mqtt_read_publish_payload failed: %d", bytes_read);
+				break;
+			}
+			payload_buf[bytes_read] = '\0';
+
+			/* Drain any bytes beyond our buffer to keep the stream in sync */
+			size_t remaining = total_len - (size_t)bytes_read;
+			while (remaining > 0) {
+				char drain[32];
+				size_t chunk = MIN(remaining, sizeof(drain));
+				int rc = mqtt_read_publish_payload_blocking(&client, drain, chunk);
+				if (rc <= 0) {
+					break;
+				}
+				remaining -= (size_t)rc;
+			}
+
+			const struct mqtt_topic *topic = &evt->param.publish.message.topic;
+			if (topic->topic.size == strlen("solar_node/switch/lights/command") &&
+			    memcmp(topic->topic.utf8, "solar_node/switch/lights/command",
+				   topic->topic.size) == 0) {
+				bool light_on;
+				if (strcmp(payload_buf, "ON") == 0) {
+					light_on = true;
+				} else if (strcmp(payload_buf, "OFF") == 0) {
+					light_on = false;
+				} else {
+					LOG_WRN("Unhandled lights payload: %s", payload_buf);
+					break;
+				}
+
+				int rc = output_control_set(light_on);
+				if (rc == 0) {
+					mqtt_publish_str("solar_node/switch/lights/state",
+							 light_on ? "ON" : "OFF", true);
+				}
+			}
 		}
 		break;
 	case MQTT_EVT_DISCONNECT:
@@ -449,6 +532,9 @@ void solar_mqtt_init(void)
 	}
 
 	dht_sensor_init();
+	if (output_control_init() < 0) {
+		LOG_WRN("Output control init failed; switch will remain unavailable");
+	}
 
 	/* Register scan callbacks */
 	net_mgmt_init_event_callback(&scan_cb, scan_event_cb,

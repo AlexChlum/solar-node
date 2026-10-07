@@ -9,7 +9,7 @@ description: "Guidance for future agents working on the Solar Node Zephyr ESP32 
 
 **Solar Node** is a battery-powered ESP32-based device running Zephyr RTOS that collects solar/battery telemetry and sends it to Home Assistant via MQTT.
 
-**Current Status (2026-10-02):** Core implementation complete and working. WiFi auto-connect, dual-channel ADC voltage reading, and full MQTT telemetry with Home Assistant auto-discovery are all operational. The device is visible in HA with Solar Voltage, Battery Voltage, and RSSI sensors. The codebase is now being reorganized for reliability, new features, and OTA capability.
+**Current Status (2026-10-06):** Phases 0–2 complete. WiFi auto-connect, dual-channel ADC voltage, MQTT telemetry, HA auto-discovery, DHT22 temperature/humidity, and MOSFET/LED switch control are all operational. The device is visible in HA with Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity, and a Lights switch (IO32/Pwr3/J16). The switch is also controllable from the Zephyr shell via `regulator enable/disable pwr3`.
 
 **Technology Stack:**
 - **Firmware:** Zephyr RTOS v4.4.0 (C with C++ entry point)
@@ -77,8 +77,9 @@ solar-node/
 - **Solar voltage input:** ADC1 channel 7 (IO35/J2), divider ratio 12.506×
 - **Battery voltage input:** ADC1 channel 6 (IO34/J3), divider ratio 5.865×
 - **Battery chemistry:** Lead-Acid / AGM
-- **MOSFET output pin:** TBD — likely IO26, IO25, or IO4 (confirm before Phase 2)
+- **MOSFET output pin:** IO32 / Pwr 3 (J16) on the ESPander board — confirmed for Phase 2
 - **DHT22 data pin:** IO26 (gpio0, pin 26) — confirmed and implemented in Phase 1
+- **I2S BCK/WS (WS2812):** BCK → IO4, WS → IO16 (relocated from IO32/IO33 to free IO32 for the MOSFET)
 
 ---
 
@@ -168,31 +169,28 @@ Zephyr has a built-in `aosong,dht22` sensor driver — no third-party library re
 ---
 
 ### Phase 2 — MOSFET/LED Switch Control via MQTT
-**Prerequisite:** Confirm MOSFET gate GPIO pin (likely IO25 or IO26) before modifying `app.overlay`.
+**Prerequisite:** ✅ Confirmed: MOSFET gate = IO32 / GPO_3 / Pwr 3 (J16) on ESPander board.
 
-MQTT subscribe + GPIO output. HA treats this as a `switch` entity with a `command_topic`. The firmware subscribes, receives ON/OFF payloads, drives the GPIO, and publishes state back.
+MQTT subscribe + `regulator-fixed` DT binding. HA treats this as a `switch` entity. The firmware subscribes, receives ON/OFF payloads, drives IO32 via the Zephyr regulator API, and publishes state back. Also controllable from the shell.
 
 **Checklist:**
-- [ ] Add GPIO output node to `app.overlay` for the MOSFET gate pin
-- [ ] Create `src/output_control.h` and `src/output_control.c`:
-  - `output_control_init()` — configure pin as GPIO output, default LOW
-  - `output_control_set(bool on)` — drive the pin
-- [ ] Add `src/output_control.c` to `CMakeLists.txt`
-- [ ] In `mqtt_event_handler` on `MQTT_EVT_CONNACK`: subscribe to `solar_node/switch/lights/command`
-- [ ] Handle `MQTT_EVT_PUBLISH`: compare payload to `"ON"` / `"OFF"`, call `output_control_set()`, publish new state to `solar_node/switch/lights/state` (retained)
-- [ ] Add HA Discovery for switch entity on CONNACK:
-  ```json
-  {
-    "name": "Lights",
-    "command_topic": "solar_node/switch/lights/command",
-    "state_topic": "solar_node/switch/lights/state",
-    "payload_on": "ON", "payload_off": "OFF", "retain": true,
-    "unique_id": "solar_node_lights",
-    "device": {"identifiers": ["solar_node"], "name": "Solar Node"}
-  }
-  ```
+- [x] Add `pwr3` `regulator-fixed` node to `app.overlay` (IO32 = gpio1 pin 0, `GPIO_ACTIVE_HIGH`)
+- [x] Relocate I2S BCK from IO32 → IO4, WS from IO33 → IO16 in `app.overlay` (IO32/IO33 are GPO_3/GPO_2 on ESPander — they cannot double as I2S clocks)
+- [x] Add `CONFIG_REGULATOR=y` and `CONFIG_REGULATOR_SHELL=y` to `prj.conf`
+- [x] Create `src/output_control.h` and `src/output_control.c` using `regulator_enable()` / `regulator_disable()` with `regulator_is_enabled()` guard
+- [x] Add `src/output_control.c` to `CMakeLists.txt`
+- [x] In `mqtt_event_handler` on `MQTT_EVT_CONNACK`: subscribe to `solar_node/switch/lights/command`
+- [x] Handle `MQTT_EVT_PUBLISH` using `mqtt_read_publish_payload_blocking()` (payload.data is always NULL in Zephyr MQTT receive events — must read from socket)
+- [x] Add HA Discovery for switch entity on CONNACK
+- [x] Publish retained `OFF` state on connect
 
-**Verification:** HA shows a Lights switch; toggling ON/OFF in HA dashboard drives the GPIO (verify with multimeter before connecting MOSFET load)
+**Key lessons (captured for future agents):**
+- IO32 is in ESP32 GPIO bank 1 (`gpio1`); its pin index within that bank is **0**, not 32. Using `gpio0` with pin 32 silently does nothing.
+- `evt->param.publish.message.payload.data` is **always NULL** on MQTT receive in Zephyr. Use `mqtt_read_publish_payload_blocking()` to read from the socket buffer. Failing to do so causes an immediate null-pointer fault (EXCCAUSE 28).
+- `regulator-fixed` is the correct binding for a GPIO-controlled MOSFET power switch. It exposes the output via both the C regulator API and the shell.
+- Shell usage: `regulator enable pwr3` / `regulator disable pwr3` / `regulator status`
+
+**Verification:** ✅ HA shows Lights switch under Solar Node device; ON/OFF in HA toggles IO32; shell can also control it independently
 
 ---
 
@@ -275,6 +273,6 @@ Note: SoC accuracy is best on resting voltage (no charge/discharge current). Rea
 
 ---
 
-**Last Updated:** 2026-10-03
-**Working Features:** WiFi auto-connect, dual ADC voltage reading (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity)
-**Next Phase:** Phase 2 — MOSFET/LED Switch Control via MQTT
+**Last Updated:** 2026-10-06
+**Working Features:** WiFi auto-connect, dual ADC voltage reading (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
+**Next Phase:** Phase 3 — Battery State of Charge (Lead-Acid AGM)
