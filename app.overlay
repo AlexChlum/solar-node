@@ -15,10 +15,28 @@
 		status = "okay";
 	};
 
-	/* User node mapping for C code access via ADC_DT_SPEC_GET_BY_NAME */
-	zephyr,user {
-		io-channels = <&adc0 7>, <&adc0 6>;
-		io-channel-names = "SOLAR_V", "BATTERY_V";
+	/* Solar panel input voltage: J2 / IO35, ADC1 ch7.
+	 * Physical divider: R_bottom = 10kΩ, R_top = 100kΩ → ratio 11.0×.
+	 * Note: readings may not match multimeter due to resistor tolerances and
+	 * ESP32 ADC non-linearity. Recalibrate full-ohms against a known voltage if needed. */
+	vsolar: vsolar {
+		compatible = "voltage-divider";
+		io-channels = <&adc0 7>;
+		output-ohms = <10000>;
+		full-ohms = <110000>;
+		skip-calibration;
+		status = "okay";
+	};
+
+	/* Battery voltage: J3 / IO34, ADC1 ch6.
+	 * Physical divider: R_bottom = 10kΩ, R_top = 47kΩ → ratio 5.7×. */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc0 6>;
+		output-ohms = <10000>;
+		full-ohms = <57000>;
+		skip-calibration;
+		status = "okay";
 	};
 
 	/* Pwr 3 (J16) — N-channel MOSFET low-side switch on IO32 (gpio1 pin 0).
@@ -61,7 +79,8 @@
 	#address-cells = <1>;
 	#size-cells = <0>;
 
-	/* Solar Panel Voltage: J2 Header -> IO35 (ADC1 Channel 7) */
+	/* Solar Panel Voltage: J2 Header -> IO35 (ADC1 Channel 7)
+	 * Referenced by vsolar voltage-divider node. */
 	channel@7 {
 		reg = <7>;
 		zephyr,gain = "ADC_GAIN_1_4";
@@ -70,7 +89,8 @@
 		zephyr,resolution = <12>;
 	};
 
-	/* Battery Voltage: J3 Header -> IO34 (ADC1 Channel 6) */
+	/* Battery Voltage: J3 Header -> IO34 (ADC1 Channel 6)
+	 * Referenced by vbatt voltage-divider node. */
 	channel@6 {
 		reg = <6>;
 		zephyr,gain = "ADC_GAIN_1_4";

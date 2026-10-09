@@ -1,8 +1,9 @@
 /* Full MQTT client: plain (non-TLS) connection with RSSI, Solar V, Battery V,
- * Temperature, and Humidity telemetry.
+ * Battery SoC, Battery Status, Temperature, and Humidity telemetry.
  * - resolves MQTT_BROKER_HOST
  * - connects to broker, sets LWT to solar_node/availability (offline retained)
- * - reads ADC channels for solar (J2) and battery (J3) with voltage divider math
+ * - reads solar/battery voltage via voltage-divider sensor nodes (vsolar, vbatt)
+ * - computes battery SoC from AGM discharge curve; detects charging state
  * - reads DHT22 on IO26 for temperature and humidity
  */
 
@@ -11,6 +12,7 @@
 #include "wifi_autoconnect.h"
 #include "dht_sensor.h"
 #include "output_control.h"
+#include "battery_soc.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -19,7 +21,7 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/wifi_mgmt.h>
-#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/devicetree.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -30,17 +32,13 @@
 
 LOG_MODULE_REGISTER(solar_mqtt, LOG_LEVEL_INF);
 
-/* ADC Definitions & Divider Math */
-#define DT_SPEC_SOLAR   ADC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), solar_v)
-#define DT_SPEC_BATTERY ADC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), battery_v)
+/* Voltage sensor devices from DT voltage-divider nodes */
+static const struct device *const dev_vsolar = DEVICE_DT_GET(DT_NODELABEL(vsolar));
+static const struct device *const dev_vbatt  = DEVICE_DT_GET(DT_NODELABEL(vbatt));
 
-static const struct adc_dt_spec adc_solar = DT_SPEC_SOLAR;
-static const struct adc_dt_spec adc_battery = DT_SPEC_BATTERY;
-
-/* Voltage Divider Ratios: (R_top + R_bottom) / R_bottom */
-#define SOLAR_DIVIDER_RATIO   12.506f
-#define BATTERY_DIVIDER_RATIO 5.865f
-#define ADC_OVERSAMPLE_COUNT  16
+/* AGM battery SoC thresholds */
+#define BATT_FULL_VOLTAGE_V   12.70f  /* resting voltage at 100 % SoC */
+#define CHARGING_SOLAR_DELTA   0.10f  /* solar must exceed battery by this to be "Charging" */
 
 /* Buffers and client instance */
 static struct mqtt_client client;
@@ -65,45 +63,30 @@ static volatile bool mqtt_connected = false;
 
 static int mqtt_do_connect(void);
 
-/* Reads raw ADC counts, averages 16 samples, and converts to actual scaled voltage.
- * adc_channel_setup_dt() must be called once at init before invoking this. */
-static int read_channel_volts(const struct adc_dt_spec *spec, float divider_ratio, float *out_volts)
+/* Reads scaled voltage from a voltage-divider sensor node.
+ * The driver handles ADC channel setup, calibration, and ratio scaling. */
+static int read_sensor_voltage(const struct device *dev, float *out_volts)
 {
-	if (!adc_is_ready_dt(spec)) {
-		LOG_ERR("ADC device %s not ready", spec->dev->name);
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Voltage sensor %s not ready", dev->name);
 		return -ENODEV;
 	}
 
-	int16_t sample_buf;
-	struct adc_sequence sequence = {
-		.buffer = &sample_buf,
-		.buffer_size = sizeof(sample_buf),
-	};
-
-	adc_sequence_init_dt(spec, &sequence);
-
-	int32_t val_sum = 0;
-	int ret;
-	for (int i = 0; i < ADC_OVERSAMPLE_COUNT; i++) {
-		ret = adc_read(spec->dev, &sequence);
-		if (ret < 0) {
-			LOG_ERR("ADC read error (%d)", ret);
-			return ret;
-		}
-		val_sum += sample_buf;
-		k_usleep(100);
-	}
-
-	int32_t val_avg = val_sum / ADC_OVERSAMPLE_COUNT;
-	int32_t val_mv = val_avg;
-
-	ret = adc_raw_to_millivolts_dt(spec, &val_mv);
+	int ret = sensor_sample_fetch(dev);
 	if (ret < 0) {
-		LOG_ERR("ADC raw to mV conversion failed (%d)", ret);
+		LOG_ERR("sensor_sample_fetch(%s) failed: %d", dev->name, ret);
 		return ret;
 	}
 
-	*out_volts = ((float)val_mv / 1000.0f) * divider_ratio;
+	struct sensor_value val;
+	ret = sensor_channel_get(dev, SENSOR_CHAN_VOLTAGE, &val);
+	if (ret < 0) {
+		LOG_ERR("sensor_channel_get(%s) failed: %d", dev->name, ret);
+		return ret;
+	}
+
+	/* sensor_value for SENSOR_CHAN_VOLTAGE: val1 = integer volts, val2 = µV fraction */
+	*out_volts = (float)val.val1 + (float)val.val2 / 1000000.0f;
 	return 0;
 }
 
@@ -203,6 +186,7 @@ static void mqtt_publish_str(const char *topic_str, const char *payload, bool re
 }
 
 static void publish_telemetry(float solar_v, float battery_v,
+			      int soc,
 			      bool dht_ok, float temp_c, float humidity_pct)
 {
 	char payload[32];
@@ -221,7 +205,11 @@ static void publish_telemetry(float solar_v, float battery_v,
 	snprintf(payload, sizeof(payload), "%.2f", battery_v);
 	mqtt_publish_str("solar_node/sensor/battery_voltage/state", payload, false);
 
-	/* 4 & 5. Temperature and Humidity (skipped if DHT22 read failed) */
+	/* 4. Battery SoC — clamped to 100 when charging or at full resting voltage */
+	snprintf(payload, sizeof(payload), "%d", soc);
+	mqtt_publish_str("solar_node/sensor/battery_soc/state", payload, false);
+
+	/* 5 & 6. Temperature and Humidity (skipped if DHT22 read failed) */
 	if (dht_ok) {
 		snprintf(payload, sizeof(payload), "%.1f", temp_c);
 		mqtt_publish_str("solar_node/sensor/temperature/state", payload, false);
@@ -323,6 +311,16 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 				"\"unique_id\":\"solar_node_lights\","
 				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
 
+			static const char disc_battery_soc[] =
+				"{\"name\":\"Battery SoC\","
+				"\"state_topic\":\"solar_node/sensor/battery_soc/state\","
+				"\"unit_of_measurement\":\"%\","
+				"\"device_class\":\"battery\","
+				"\"suggested_display_precision\":0,"
+				"\"value_template\":\"{{ value }}\","
+				"\"unique_id\":\"solar_node_battery_soc\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
 			/* Yield between each discovery publish — rapid back-to-back sends
 			 * exhaust the TCP TX buffers and cause the broker to drop the connection. */
 			mqtt_publish_str("homeassistant/sensor/solar_node/rssi/config", disc_rssi, true);
@@ -336,6 +334,8 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 			mqtt_publish_str("homeassistant/sensor/solar_node/humidity/config", disc_humidity, true);
 			k_msleep(100);
 			mqtt_publish_str("homeassistant/switch/solar_node/lights/config", disc_lights, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/sensor/solar_node/battery_soc/config", disc_battery_soc, true);
 			mqtt_publish_str("solar_node/switch/lights/state", "OFF", true);
 
 		} else {
@@ -465,18 +465,29 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 			k_msleep(500);
 		}
 
-		/* Read Analog Voltages */
+		/* Read voltages via voltage-divider sensor nodes */
 		float solar_v = 0.0f;
 		float battery_v = 0.0f;
 
-		int err = read_channel_volts(&adc_solar, SOLAR_DIVIDER_RATIO, &solar_v);
+		int err = read_sensor_voltage(dev_vsolar, &solar_v);
 		if (err) {
 			LOG_ERR("Failed to read Solar Voltage: %d", err);
 		}
 
-		err = read_channel_volts(&adc_battery, BATTERY_DIVIDER_RATIO, &battery_v);
+		err = read_sensor_voltage(dev_vbatt, &battery_v);
 		if (err) {
 			LOG_ERR("Failed to read Battery Voltage: %d", err);
+		}
+
+		/* Compute battery SoC; clamp to 100 when solar is actively charging
+		 * or battery is at/above its full resting voltage. */
+		int soc;
+
+		if (solar_v > battery_v + CHARGING_SOLAR_DELTA ||
+		    battery_v >= BATT_FULL_VOLTAGE_V) {
+			soc = 100;
+		} else {
+			soc = battery_soc_from_voltage(battery_v);
 		}
 
 		/* Read DHT22 Temperature & Humidity */
@@ -485,7 +496,7 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 		bool dht_ok = (dht_sensor_read(&temp_c, &humidity_pct) == 0);
 
 		/* Publish all gathered telemetry */
-		publish_telemetry(solar_v, battery_v, dht_ok, temp_c, humidity_pct);
+		publish_telemetry(solar_v, battery_v, soc, dht_ok, temp_c, humidity_pct);
 
 		/* Publish cycle every 60 seconds */
 		k_msleep(60000);
@@ -521,14 +532,11 @@ void solar_mqtt_init(void)
 
 	k_sem_init(&scan_sem, 0, 1);
 
-	/* Set up ADC channels once at init rather than on every read */
-	int adc_err = adc_channel_setup_dt(&adc_solar);
-	if (adc_err < 0) {
-		LOG_ERR("ADC solar channel setup failed (%d)", adc_err);
+	if (!device_is_ready(dev_vsolar)) {
+		LOG_ERR("vsolar voltage sensor not ready");
 	}
-	adc_err = adc_channel_setup_dt(&adc_battery);
-	if (adc_err < 0) {
-		LOG_ERR("ADC battery channel setup failed (%d)", adc_err);
+	if (!device_is_ready(dev_vbatt)) {
+		LOG_ERR("vbatt voltage sensor not ready");
 	}
 
 	dht_sensor_init();

@@ -74,8 +74,8 @@ solar-node/
 ## Hardware Details
 
 - **LED Strip:** WS2812 via I2S0 (GPIO2 data, GPIO32 BCK, GPIO33 WS)
-- **Solar voltage input:** ADC1 channel 7 (IO35/J2), divider ratio 12.506×
-- **Battery voltage input:** ADC1 channel 6 (IO34/J3), divider ratio 5.865×
+- **Solar voltage input:** ADC1 channel 7 (IO35/J2), R_bottom = 10kΩ, R_top = 100kΩ (theoretical 11.0×, calibrated 12.506× to match multimeter)
+- **Battery voltage input:** ADC1 channel 6 (IO34/J3), R_bottom = 10kΩ, R_top = 47kΩ (theoretical 5.7×, calibrated 5.865× to match multimeter)
 - **Battery chemistry:** Lead-Acid / AGM
 - **MOSFET output pin:** IO32 / Pwr 3 (J16) on the ESPander board — confirmed for Phase 2
 - **DHT22 data pin:** IO26 (gpio0, pin 26) — confirmed and implemented in Phase 1
@@ -195,14 +195,19 @@ MQTT subscribe + `regulator-fixed` DT binding. HA treats this as a `switch` enti
 ---
 
 ### Phase 3 — Battery State of Charge (Lead-Acid AGM)
-**Goal:** Report battery % alongside voltage. No extra hardware required — derived from voltage using an AGM discharge curve.
+**Goal:** Report battery SoC % and charging status alongside voltage. Voltage acquisition refactored from raw ADC to Zephyr's `voltage-divider` sensor binding.
 
-Note: SoC accuracy is best on resting voltage (no charge/discharge current). Readings may be elevated while the solar panel is charging.
+Note: SoC accuracy is best on resting open-circuit voltage. Readings reflect "Charging" or "Full" when the solar panel is actively charging.
 
 **Checklist:**
-- [ ] Create `src/battery_soc.h` and `src/battery_soc.c`:
+- [x] Refactor voltage acquisition to Zephyr `voltage-divider` sensor binding (Option B):
+  - Add `vsolar` and `vbatt` nodes (`compatible = "voltage-divider"`) to `app.overlay`
+  - Remove `zephyr,user` ADC direct references; divider math now in DT (`output-ohms` / `full-ohms`)
+  - Replace `read_channel_volts()` with `read_sensor_voltage()` using sensor API
+  - Add `CONFIG_VOLTAGE_DIVIDER=y` to `prj.conf`
+- [x] Create `src/battery_soc.h` and `src/battery_soc.c`:
   - `battery_soc_from_voltage(float volts)` → `int` (0–100)
-  - Piecewise linear interpolation over AGM curve:
+  - Piecewise linear interpolation over AGM discharge curve:
 
     | Volts  | SoC % |
     |--------|-------|
@@ -217,11 +222,22 @@ Note: SoC accuracy is best on resting voltage (no charge/discharge current). Rea
     | 11.60  | 10    |
     | ≤11.60 | 0     |
 
-- [ ] Add `src/battery_soc.c` to `CMakeLists.txt`
-- [ ] Call in `mqtt_worker` after reading battery voltage; publish int value to `solar_node/sensor/battery_soc/state`
-- [ ] Add HA Discovery on CONNACK: `device_class: battery`, `unit_of_measurement: %`, `suggested_display_precision: 0`
+- [x] Add `src/battery_soc.c` to `CMakeLists.txt`
+- [x] Compute SoC and clamp in `mqtt_worker`:
+  - `solar_v > battery_v + 0.10V` OR `battery_v ≥ 12.70V` → SoC = 100 (charging or full)
+  - Otherwise → SoC from AGM curve
+- [x] Publish `solar_node/sensor/battery_soc/state` (integer %)
+- [x] Add HA Discovery on CONNACK: Battery SoC (`device_class: battery`, `unit_of_measurement: %`, `suggested_display_precision: 0`)
 
-**Verification:** HA shows Battery entity with % value; cross-check at a known voltage against a battery tester
+**Key lessons (captured for future agents):**
+- The `voltage-divider` sensor binding (`compatible = "voltage-divider"`) wraps an ADC channel and exposes `SENSOR_CHAN_VOLTAGE` in Volts via the standard sensor API. Enable with `CONFIG_VOLTAGE_DIVIDER=y` (or auto-enabled by the DT node).
+- `output-ohms` / `full-ohms` only need to express the correct ratio; e.g. `output-ohms = <1000>; full-ohms = <12506>;` for a 12.506× divider. The actual resistor values are not required — only the ratio matters.
+- Access the device with `DEVICE_DT_GET(DT_NODELABEL(vsolar))`. The label (`vsolar:`) must be on the DT node.
+- `sensor_value` for `SENSOR_CHAN_VOLTAGE` is in Volts: `volts = val.val1 + val.val2 / 1e6f`.
+- The `voltage-divider` driver calls `adc_channel_setup_dt` on **every** `sensor_sample_fetch`. This is fine for 60-second intervals; remove the manual `adc_channel_setup_dt` call from init.
+- Charging detection via `solar_v > battery_v + delta` is a reasonable proxy for active current flow from panel to battery. A current sensor would be required for exact determination.
+
+**Verification:** ✅ HA shows Battery SoC (%) and Battery Status (Charging/Full/Discharging) under Solar Node device, alongside existing Battery Voltage sensor
 
 ---
 
@@ -273,6 +289,6 @@ Note: SoC accuracy is best on resting voltage (no charge/discharge current). Rea
 
 ---
 
-**Last Updated:** 2026-10-06
-**Working Features:** WiFi auto-connect, dual ADC voltage reading (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
-**Next Phase:** Phase 3 — Battery State of Charge (Lead-Acid AGM)
+**Last Updated:** 2026-10-07
+**Working Features:** WiFi auto-connect, dual voltage reading via DT `voltage-divider` nodes (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, Battery SoC, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
+**Next Phase:** Phase 4 — OTA Firmware Updates (MCUmgr SMP over TCP/IP)

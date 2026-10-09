@@ -9,4 +9,5 @@ target_sources(app PRIVATE
     src/mqtt_client.c
     src/dht_sensor.c
     src/output_control.c
+    src/battery_soc.c
 )
