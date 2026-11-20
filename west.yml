@@ -2,10 +2,18 @@ manifest:
   remotes:
     - name: zephyrproject-rtos
       url-base: https://github.com/zephyrproject-rtos
+    - name: golioth
+      url-base: https://github.com/golioth
+
   projects:
     - name: zephyr
       remote: zephyrproject-rtos
       revision: v4.4.0
       import: true
+    - name: zephyr-ina260
+      remote: golioth
+      revision: main
+      path: modules/drivers/ina260
+
   self:
     path: solar-node

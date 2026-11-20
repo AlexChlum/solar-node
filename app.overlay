@@ -1,6 +1,5 @@
 #include <zephyr/dt-bindings/led/led.h>
 #include <zephyr/dt-bindings/pinctrl/esp32-pinctrl.h>
-#include <zephyr/dt-bindings/adc/adc.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
@@ -12,30 +11,6 @@
 		compatible = "aosong,dht";
 		dio-gpios = <&gpio0 26 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
 		dht22;
-		status = "okay";
-	};
-
-	/* Solar panel input voltage: J2 / IO35, ADC1 ch7.
-	 * Physical divider: R_bottom = 10kΩ, R_top = 100kΩ → ratio 11.0×.
-	 * Note: readings may not match multimeter due to resistor tolerances and
-	 * ESP32 ADC non-linearity. Recalibrate full-ohms against a known voltage if needed. */
-	vsolar: vsolar {
-		compatible = "voltage-divider";
-		io-channels = <&adc0 7>;
-		output-ohms = <10000>;
-		full-ohms = <110000>;
-		skip-calibration;
-		status = "okay";
-	};
-
-	/* Battery voltage: J3 / IO34, ADC1 ch6.
-	 * Physical divider: R_bottom = 10kΩ, R_top = 47kΩ → ratio 5.7×. */
-	vbatt: vbatt {
-		compatible = "voltage-divider";
-		io-channels = <&adc0 6>;
-		output-ohms = <10000>;
-		full-ohms = <57000>;
-		skip-calibration;
 		status = "okay";
 	};
 
@@ -74,28 +49,12 @@
 	};
 };
 
-&adc0 {
-	status = "okay";
-	#address-cells = <1>;
-	#size-cells = <0>;
+&i2c0 {
+    status = "okay";
 
-	/* Solar Panel Voltage: J2 Header -> IO35 (ADC1 Channel 7)
-	 * Referenced by vsolar voltage-divider node. */
-	channel@7 {
-		reg = <7>;
-		zephyr,gain = "ADC_GAIN_1_4";
-		zephyr,reference = "ADC_REF_INTERNAL";
-		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-		zephyr,resolution = <12>;
-	};
-
-	/* Battery Voltage: J3 Header -> IO34 (ADC1 Channel 6)
-	 * Referenced by vbatt voltage-divider node. */
-	channel@6 {
-		reg = <6>;
-		zephyr,gain = "ADC_GAIN_1_4";
-		zephyr,reference = "ADC_REF_INTERNAL";
-		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-		zephyr,resolution = <12>;
-	};
+    ina260: ina260@40 {
+        compatible = "ti,ina260";
+        reg = <0x40>;
+        status = "okay";
+    };
 };

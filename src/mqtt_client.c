@@ -1,9 +1,9 @@
-/* Full MQTT client: plain (non-TLS) connection with RSSI, Solar V, Battery V,
- * Battery SoC, Battery Status, Temperature, and Humidity telemetry.
+/* Full MQTT client: plain (non-TLS) connection with RSSI, battery INA260
+ * voltage/current/power, Battery SoC, Temperature, and Humidity telemetry.
  * - resolves MQTT_BROKER_HOST
  * - connects to broker, sets LWT to solar_node/availability (offline retained)
- * - reads solar/battery voltage via voltage-divider sensor nodes (vsolar, vbatt)
- * - computes battery SoC from AGM discharge curve; detects charging state
+ * - reads battery bus voltage, current, and power via INA260 sensor node
+ * - computes battery SoC from AGM discharge curve using INA260 voltage
  * - reads DHT22 on IO26 for temperature and humidity
  */
 
@@ -32,13 +32,11 @@
 
 LOG_MODULE_REGISTER(solar_mqtt, LOG_LEVEL_INF);
 
-/* Voltage sensor devices from DT voltage-divider nodes */
-static const struct device *const dev_vsolar = DEVICE_DT_GET(DT_NODELABEL(vsolar));
-static const struct device *const dev_vbatt  = DEVICE_DT_GET(DT_NODELABEL(vbatt));
+/* Battery INA260 device from DTS */
+static const struct device *const dev_battery_ina = DEVICE_DT_GET(DT_NODELABEL(ina260));
 
 /* AGM battery SoC thresholds */
 #define BATT_FULL_VOLTAGE_V   12.70f  /* resting voltage at 100 % SoC */
-#define CHARGING_SOLAR_DELTA   0.10f  /* solar must exceed battery by this to be "Charging" */
 
 /* Buffers and client instance */
 static struct mqtt_client client;
@@ -50,7 +48,7 @@ static struct net_mgmt_event_callback scan_cb;
 static struct k_sem scan_sem;
 static int8_t last_rssi = INT8_MIN;
 
-/* Worker thread that performs periodic scans, reads ADCs, and publishes telemetry */
+/* Worker thread that performs periodic scans, reads sensor values, and publishes telemetry */
 static struct k_thread mqtt_thread_data;
 K_THREAD_STACK_DEFINE(mqtt_thread_stack, 4096);
 
@@ -63,30 +61,53 @@ static volatile bool mqtt_connected = false;
 
 static int mqtt_do_connect(void);
 
-/* Reads scaled voltage from a voltage-divider sensor node.
- * The driver handles ADC channel setup, calibration, and ratio scaling. */
-static int read_sensor_voltage(const struct device *dev, float *out_volts)
+static float sensor_value_to_f32(const struct sensor_value *val)
 {
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Voltage sensor %s not ready", dev->name);
+	return (float)val->val1 + (float)val->val2 / 1000000.0f;
+}
+
+static int read_battery_ina260(float *out_battery_v, float *out_battery_current_a, float *out_battery_power_w)
+{
+	if (!device_is_ready(dev_battery_ina)) {
+		LOG_ERR("Battery INA260 %s not ready", dev_battery_ina->name);
 		return -ENODEV;
 	}
 
-	int ret = sensor_sample_fetch(dev);
+	int ret = sensor_sample_fetch(dev_battery_ina);
 	if (ret < 0) {
-		LOG_ERR("sensor_sample_fetch(%s) failed: %d", dev->name, ret);
+		LOG_ERR("sensor_sample_fetch(%s) failed: %d", dev_battery_ina->name, ret);
 		return ret;
 	}
 
-	struct sensor_value val;
-	ret = sensor_channel_get(dev, SENSOR_CHAN_VOLTAGE, &val);
+	struct sensor_value voltage_val;
+	struct sensor_value current_val;
+	struct sensor_value power_val;
+
+	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_VOLTAGE, &voltage_val);
 	if (ret < 0) {
-		LOG_ERR("sensor_channel_get(%s) failed: %d", dev->name, ret);
+		LOG_ERR("sensor_channel_get(%s, VOLTAGE) failed: %d", dev_battery_ina->name, ret);
 		return ret;
 	}
 
-	/* sensor_value for SENSOR_CHAN_VOLTAGE: val1 = integer volts, val2 = µV fraction */
-	*out_volts = (float)val.val1 + (float)val.val2 / 1000000.0f;
+	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_CURRENT, &current_val);
+	if (ret < 0) {
+		LOG_ERR("sensor_channel_get(%s, CURRENT) failed: %d", dev_battery_ina->name, ret);
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_POWER, &power_val);
+	if (ret < 0) {
+		LOG_ERR("sensor_channel_get(%s, POWER) failed: %d", dev_battery_ina->name, ret);
+		return ret;
+	}
+
+	*out_battery_v = sensor_value_to_f32(&voltage_val);
+	*out_battery_current_a = sensor_value_to_f32(&current_val);
+	*out_battery_power_w = sensor_value_to_f32(&power_val);
+
+	LOG_INF("Battery INA260 -> V=%.6fV I=%.6fA P=%.6fW",
+		*out_battery_v, *out_battery_current_a, *out_battery_power_w);
+
 	return 0;
 }
 
@@ -185,7 +206,7 @@ static void mqtt_publish_str(const char *topic_str, const char *payload, bool re
 	}
 }
 
-static void publish_telemetry(float solar_v, float battery_v,
+static void publish_telemetry(float battery_v, float battery_current_a, float battery_power_w,
 			      int soc,
 			      bool dht_ok, float temp_c, float humidity_pct)
 {
@@ -197,19 +218,23 @@ static void publish_telemetry(float solar_v, float battery_v,
 		mqtt_publish_str("solar_node/sensor/rssi/state", payload, false);
 	}
 
-	/* 2. Solar Voltage */
-	snprintf(payload, sizeof(payload), "%.2f", solar_v);
-	mqtt_publish_str("solar_node/sensor/solar_voltage/state", payload, false);
-
-	/* 3. Battery Voltage */
+	/* 2. Battery Voltage */
 	snprintf(payload, sizeof(payload), "%.2f", battery_v);
 	mqtt_publish_str("solar_node/sensor/battery_voltage/state", payload, false);
 
-	/* 4. Battery SoC — clamped to 100 when charging or at full resting voltage */
+	/* 3. Battery Current */
+	snprintf(payload, sizeof(payload), "%.3f", battery_current_a);
+	mqtt_publish_str("solar_node/sensor/battery_current/state", payload, false);
+
+	/* 4. Battery Power */
+	snprintf(payload, sizeof(payload), "%.3f", battery_power_w);
+	mqtt_publish_str("solar_node/sensor/battery_power/state", payload, false);
+
+	/* 5. Battery SoC */
 	snprintf(payload, sizeof(payload), "%d", soc);
 	mqtt_publish_str("solar_node/sensor/battery_soc/state", payload, false);
 
-	/* 5 & 6. Temperature and Humidity (skipped if DHT22 read failed) */
+	/* 6 & 7. Temperature and Humidity (skipped if DHT22 read failed) */
 	if (dht_ok) {
 		snprintf(payload, sizeof(payload), "%.1f", temp_c);
 		mqtt_publish_str("solar_node/sensor/temperature/state", payload, false);
@@ -261,16 +286,6 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 				"\"unique_id\":\"solar_node_rssi\","
 				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
 
-			static const char disc_solar[] =
-				"{\"name\":\"Solar Voltage\","
-				"\"state_topic\":\"solar_node/sensor/solar_voltage/state\","
-				"\"unit_of_measurement\":\"V\","
-				"\"device_class\":\"voltage\","
-				"\"suggested_display_precision\":2,"
-				"\"value_template\":\"{{ value }}\","
-				"\"unique_id\":\"solar_node_solar_v\","
-				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
-
 			static const char disc_battery[] =
 				"{\"name\":\"Battery Voltage\","
 				"\"state_topic\":\"solar_node/sensor/battery_voltage/state\","
@@ -279,6 +294,26 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 				"\"suggested_display_precision\":2,"
 				"\"value_template\":\"{{ value }}\","
 				"\"unique_id\":\"solar_node_battery_v\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
+			static const char disc_battery_current[] =
+				"{\"name\":\"Battery Current\","
+				"\"state_topic\":\"solar_node/sensor/battery_current/state\","
+				"\"unit_of_measurement\":\"A\","
+				"\"device_class\":\"current\","
+				"\"suggested_display_precision\":3,"
+				"\"value_template\":\"{{ value }}\","
+				"\"unique_id\":\"solar_node_battery_current\","
+				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
+
+			static const char disc_battery_power[] =
+				"{\"name\":\"Battery Power\","
+				"\"state_topic\":\"solar_node/sensor/battery_power/state\","
+				"\"unit_of_measurement\":\"W\","
+				"\"device_class\":\"power\","
+				"\"suggested_display_precision\":3,"
+				"\"value_template\":\"{{ value }}\","
+				"\"unique_id\":\"solar_node_battery_power\","
 				"\"device\":{\"identifiers\":[\"solar_node\"],\"name\":\"Solar Node\"}}";
 
 			static const char disc_temp[] =
@@ -323,11 +358,16 @@ static void mqtt_event_handler(struct mqtt_client *const c, const struct mqtt_ev
 
 			/* Yield between each discovery publish — rapid back-to-back sends
 			 * exhaust the TCP TX buffers and cause the broker to drop the connection. */
+			/* Clear old retained solar voltage discovery because solar ADC telemetry was removed. */
+			mqtt_publish_str("homeassistant/sensor/solar_node/solar_voltage/config", "", true);
+			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/rssi/config", disc_rssi, true);
 			k_msleep(100);
-			mqtt_publish_str("homeassistant/sensor/solar_node/solar_voltage/config", disc_solar, true);
-			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/battery_voltage/config", disc_battery, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/sensor/solar_node/battery_current/config", disc_battery_current, true);
+			k_msleep(100);
+			mqtt_publish_str("homeassistant/sensor/solar_node/battery_power/config", disc_battery_power, true);
 			k_msleep(100);
 			mqtt_publish_str("homeassistant/sensor/solar_node/temperature/config", disc_temp, true);
 			k_msleep(100);
@@ -465,30 +505,18 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 			k_msleep(500);
 		}
 
-		/* Read voltages via voltage-divider sensor nodes */
-		float solar_v = 0.0f;
+		/* Read battery INA260 measurements */
 		float battery_v = 0.0f;
+		float battery_current_a = 0.0f;
+		float battery_power_w = 0.0f;
 
-		int err = read_sensor_voltage(dev_vsolar, &solar_v);
+		int err = read_battery_ina260(&battery_v, &battery_current_a, &battery_power_w);
 		if (err) {
-			LOG_ERR("Failed to read Solar Voltage: %d", err);
+			LOG_ERR("Failed to read battery INA260: %d", err);
 		}
 
-		err = read_sensor_voltage(dev_vbatt, &battery_v);
-		if (err) {
-			LOG_ERR("Failed to read Battery Voltage: %d", err);
-		}
-
-		/* Compute battery SoC; clamp to 100 when solar is actively charging
-		 * or battery is at/above its full resting voltage. */
-		int soc;
-
-		if (solar_v > battery_v + CHARGING_SOLAR_DELTA ||
-		    battery_v >= BATT_FULL_VOLTAGE_V) {
-			soc = 100;
-		} else {
-			soc = battery_soc_from_voltage(battery_v);
-		}
+		/* Compute battery SoC from INA260 bus voltage. */
+		int soc = (battery_v >= BATT_FULL_VOLTAGE_V) ? 100 : battery_soc_from_voltage(battery_v);
 
 		/* Read DHT22 Temperature & Humidity */
 		float temp_c = 0.0f;
@@ -496,7 +524,8 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 		bool dht_ok = (dht_sensor_read(&temp_c, &humidity_pct) == 0);
 
 		/* Publish all gathered telemetry */
-		publish_telemetry(solar_v, battery_v, soc, dht_ok, temp_c, humidity_pct);
+		publish_telemetry(battery_v, battery_current_a, battery_power_w, soc,
+				  dht_ok, temp_c, humidity_pct);
 
 		/* Publish cycle every 60 seconds */
 		k_msleep(60000);
@@ -532,11 +561,8 @@ void solar_mqtt_init(void)
 
 	k_sem_init(&scan_sem, 0, 1);
 
-	if (!device_is_ready(dev_vsolar)) {
-		LOG_ERR("vsolar voltage sensor not ready");
-	}
-	if (!device_is_ready(dev_vbatt)) {
-		LOG_ERR("vbatt voltage sensor not ready");
+	if (!device_is_ready(dev_battery_ina)) {
+		LOG_ERR("battery INA260 sensor not ready");
 	}
 
 	dht_sensor_init();

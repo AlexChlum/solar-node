@@ -9,7 +9,7 @@ description: "Guidance for future agents working on the Solar Node Zephyr ESP32 
 
 **Solar Node** is a battery-powered ESP32-based device running Zephyr RTOS that collects solar/battery telemetry and sends it to Home Assistant via MQTT.
 
-**Current Status (2026-10-06):** Phases 0–2 complete. WiFi auto-connect, dual-channel ADC voltage, MQTT telemetry, HA auto-discovery, DHT22 temperature/humidity, and MOSFET/LED switch control are all operational. The device is visible in HA with Solar Voltage, Battery Voltage, RSSI, Temperature, Humidity, and a Lights switch (IO32/Pwr3/J16). The switch is also controllable from the Zephyr shell via `regulator enable/disable pwr3`.
+**Current Status (2026-11-19):** WiFi auto-connect, MQTT telemetry, HA auto-discovery, DHT22 temperature/humidity, and MOSFET/LED switch control are operational. ADC voltage telemetry has been removed. Battery telemetry now comes from INA260 (voltage/current/power). A second INA260 for solar telemetry is planned but not yet wired.
 
 **Technology Stack:**
 - **Firmware:** Zephyr RTOS v4.4.0 (C with C++ entry point)
@@ -60,8 +60,8 @@ solar-node/
 │   ├── main.cpp               # Entry point: LED status + WiFi/MQTT startup
 │   ├── config.h               # Compile-time credentials (WiFi, MQTT broker)
 │   ├── wifi_autoconnect.h/.c  # WiFi connect/poll module with auto-retry
-│   ├── mqtt_client.h/.c       # MQTT client: ADC reads, telemetry, HA discovery
-├── app.overlay                # Device tree: ADC channels, WS2812 LED strip (I2S)
+│   ├── mqtt_client.h/.c       # MQTT client: INA260 reads, telemetry, HA discovery
+├── app.overlay                # Device tree: INA260, WS2812 LED strip (I2S)
 ├── prj.conf                   # Zephyr Kconfig flags
 ├── CMakeLists.txt             # Build: lists all src/*.c and src/*.cpp
 ├── west.yml                   # Zephyr v4.4.0 manifest
@@ -74,8 +74,8 @@ solar-node/
 ## Hardware Details
 
 - **LED Strip:** WS2812 via I2S0 (GPIO2 data, GPIO32 BCK, GPIO33 WS)
-- **Solar voltage input:** ADC1 channel 7 (IO35/J2), R_bottom = 10kΩ, R_top = 100kΩ (theoretical 11.0×, calibrated 12.506× to match multimeter)
-- **Battery voltage input:** ADC1 channel 6 (IO34/J3), R_bottom = 10kΩ, R_top = 47kΩ (theoretical 5.7×, calibrated 5.865× to match multimeter)
+- **Battery monitor:** INA260 at I2C address `0x40`
+- **Solar monitor:** Second INA260 planned (not yet connected/configured)
 - **Battery chemistry:** Lead-Acid / AGM
 - **MOSFET output pin:** IO32 / Pwr 3 (J16) on the ESPander board — confirmed for Phase 2
 - **DHT22 data pin:** IO26 (gpio0, pin 26) — confirmed and implemented in Phase 1
@@ -290,5 +290,5 @@ Note: SoC accuracy is best on resting open-circuit voltage. Readings reflect "Ch
 ---
 
 **Last Updated:** 2026-10-07
-**Working Features:** WiFi auto-connect, dual voltage reading via DT `voltage-divider` nodes (solar + battery), MQTT telemetry, HA auto-discovery (Solar Voltage, Battery Voltage, Battery SoC, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
+**Working Features:** WiFi auto-connect, battery INA260 telemetry (Battery Voltage, Battery Current, Battery Power, Battery SoC), MQTT telemetry, HA auto-discovery (Battery sensors, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
 **Next Phase:** Phase 4 — OTA Firmware Updates (MCUmgr SMP over TCP/IP)
