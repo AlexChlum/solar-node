@@ -2,67 +2,37 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Zephyr: Build ESP32 ProCPU (pristine)",
-			"type": "shell",
-			"command": ".\\.venv\\Scripts\\python.exe",
-			"args": [
-				"-m",
-				"west",
-				"build",
-				"-p",
-				"-b",
-				"esp32_devkitc/esp32/procpu",
-				"."
-			],
-			"options": {
-				"cwd": "${workspaceFolder}",
-				"env": {
-					"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
-				}
-			},
-			"group": "build",
-			"problemMatcher": []
-		},
-		{
 			"label": "Zephyr: Build ESP32 ProCPU (standard)",
 			"type": "shell",
 			"command": ".\\.venv\\Scripts\\python.exe",
-			"args": [
-				"-m",
-				"west",
-				"build",
-				"-b",
-				"esp32_devkitc/esp32/procpu",
-				"."
-			],
+			"args": ["-m", "west", "build", "-b", "esp32_devkitc/esp32/procpu", "."],
 			"options": {
 				"cwd": "${workspaceFolder}",
-				"env": {
-					"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
-				}
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
 			},
-			"group": {
-				"kind": "build",
-				"isDefault": true
+			"group": {"kind": "build", "isDefault": true},
+			"problemMatcher": []
+		},
+		{
+			"label": "Zephyr: Build ESP32 ProCPU (pristine)",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": ["-m", "west", "build", "-p", "-b", "esp32_devkitc/esp32/procpu", "."],
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
 			},
+			"group": "build",
 			"problemMatcher": []
 		},
 		{
 			"label": "Zephyr: Flash ESP32 ProCPU",
 			"type": "shell",
 			"command": ".\\.venv\\Scripts\\python.exe",
-			"args": [
-				"-m",
-				"west",
-				"flash",
-				"--build-dir",
-				"build"
-			],
+			"args": ["-m", "west", "flash", "--build-dir", "build"],
 			"options": {
 				"cwd": "${workspaceFolder}",
-				"env": {
-					"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
-				}
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
 			},
 			"problemMatcher": []
 		},
@@ -70,25 +40,12 @@
 			"label": "Zephyr: Monitor Serial (COM5 115200)",
 			"type": "shell",
 			"command": ".\\.venv\\Scripts\\python.exe",
-			"args": [
-				"-m",
-				"serial.tools.miniterm",
-				"COM5",
-				"115200"
-			],
+			"args": ["-m", "serial.tools.miniterm", "COM5", "115200"],
 			"options": {
 				"cwd": "${workspaceFolder}",
-				"env": {
-					"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
-				}
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
 			},
-			"isBackground": false,
-			"presentation": {
-				"echo": true,
-				"reveal": "always",
-				"focus": true,
-				"panel": "new"
-			},
+			"presentation": {"echo": true, "reveal": "always", "focus": true, "panel": "new"},
 			"problemMatcher": []
 		},
 		{
@@ -101,20 +58,63 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Solar Node: Verify INA260 Build",
+			"label": "Zephyr: Build OTA ESP32 ProCPU (pristine)",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": ["-m", "west", "build", "-p", "--sysbuild", "-b", "esp32_devkitc/esp32/procpu", "."],
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
+			},
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Zephyr: Flash OTA ESP32 ProCPU",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": ["-m", "west", "flash", "--build-dir", "build"],
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "OTA: Upload, Test, and Reset",
 			"type": "shell",
 			"command": ".\\.venv\\Scripts\\python.exe",
 			"args": [
-				"-m",
-				"west",
-				"build",
-				"-b",
-				"esp32_devkitc/esp32/procpu",
-				"."
+				"scripts\\ota.py",
+				"--ip",
+				"${input:otaIp}",
+				"upload-test-reset",
+				"${workspaceFolder}\\build\\solar-node\\zephyr\\zephyr.signed.bin"
 			],
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "build"
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "OTA: Confirm Active Image",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": ["scripts\\ota.py", "--ip", "${input:otaIp}", "confirm-current"],
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"}
+			},
+			"problemMatcher": []
+		}
+	],
+	"inputs": [
+		{
+			"id": "otaIp",
+			"type": "promptString",
+			"description": "Solar Node IPv4 address",
+			"default": "192.168.1.177"
 		}
 	]
 }
