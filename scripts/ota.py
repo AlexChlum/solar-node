@@ -65,7 +65,7 @@ async def upload_test_reset(ip: str, image_path: Path) -> None:
             (
                 image
                 for image in state.images
-                if image.hash and not image.active
+                if image.slot == 1 and image.hash and not image.active
             ),
             None,
         )
