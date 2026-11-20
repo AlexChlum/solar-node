@@ -2,7 +2,7 @@
  * voltage/current/power, Battery SoC, Temperature, and Humidity telemetry.
  * - resolves MQTT_BROKER_HOST
  * - connects to broker, sets LWT to solar_node/availability (offline retained)
- * - reads battery bus voltage, current, and power via INA260 sensor node
+ * - reads battery bus voltage, current, and power as INA260 rolling averages
  * - computes battery SoC from AGM discharge curve using INA260 voltage
  * - reads DHT22 on IO26 for temperature and humidity
  */
@@ -13,6 +13,7 @@
 #include "dht_sensor.h"
 #include "output_control.h"
 #include "battery_soc.h"
+#include "ina_sensor.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -21,8 +22,6 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/wifi_mgmt.h>
-#include <zephyr/drivers/sensor.h>
-#include <zephyr/devicetree.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -31,9 +30,6 @@
 #include <stdio.h>
 
 LOG_MODULE_REGISTER(solar_mqtt, LOG_LEVEL_INF);
-
-/* Battery INA260 device from DTS */
-static const struct device *const dev_battery_ina = DEVICE_DT_GET(DT_NODELABEL(ina260));
 
 /* AGM battery SoC thresholds */
 #define BATT_FULL_VOLTAGE_V   12.70f  /* resting voltage at 100 % SoC */
@@ -60,56 +56,6 @@ static bool started;
 static volatile bool mqtt_connected = false;
 
 static int mqtt_do_connect(void);
-
-static float sensor_value_to_f32(const struct sensor_value *val)
-{
-	return (float)val->val1 + (float)val->val2 / 1000000.0f;
-}
-
-static int read_battery_ina260(float *out_battery_v, float *out_battery_current_a, float *out_battery_power_w)
-{
-	if (!device_is_ready(dev_battery_ina)) {
-		LOG_ERR("Battery INA260 %s not ready", dev_battery_ina->name);
-		return -ENODEV;
-	}
-
-	int ret = sensor_sample_fetch(dev_battery_ina);
-	if (ret < 0) {
-		LOG_ERR("sensor_sample_fetch(%s) failed: %d", dev_battery_ina->name, ret);
-		return ret;
-	}
-
-	struct sensor_value voltage_val;
-	struct sensor_value current_val;
-	struct sensor_value power_val;
-
-	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_VOLTAGE, &voltage_val);
-	if (ret < 0) {
-		LOG_ERR("sensor_channel_get(%s, VOLTAGE) failed: %d", dev_battery_ina->name, ret);
-		return ret;
-	}
-
-	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_CURRENT, &current_val);
-	if (ret < 0) {
-		LOG_ERR("sensor_channel_get(%s, CURRENT) failed: %d", dev_battery_ina->name, ret);
-		return ret;
-	}
-
-	ret = sensor_channel_get(dev_battery_ina, SENSOR_CHAN_POWER, &power_val);
-	if (ret < 0) {
-		LOG_ERR("sensor_channel_get(%s, POWER) failed: %d", dev_battery_ina->name, ret);
-		return ret;
-	}
-
-	*out_battery_v = sensor_value_to_f32(&voltage_val);
-	*out_battery_current_a = sensor_value_to_f32(&current_val);
-	*out_battery_power_w = sensor_value_to_f32(&power_val);
-
-	LOG_INF("Battery INA260 -> V=%.6fV I=%.6fA P=%.6fW",
-		*out_battery_v, *out_battery_current_a, *out_battery_power_w);
-
-	return 0;
-}
 
 static int mqtt_socket_fd(const struct mqtt_client *c)
 {
@@ -505,15 +451,21 @@ static void mqtt_worker(void *p1, void *p2, void *p3)
 			k_msleep(500);
 		}
 
-		/* Read battery INA260 measurements */
+		/* Read averaged battery INA260 measurements */
 		float battery_v = 0.0f;
 		float battery_current_a = 0.0f;
 		float battery_power_w = 0.0f;
 
-		int err = read_battery_ina260(&battery_v, &battery_current_a, &battery_power_w);
+		uint32_t ina_samples = 0U;
+		int err = ina_sensor_get_averages(&battery_v, &battery_current_a, &battery_power_w, &ina_samples);
 		if (err) {
-			LOG_ERR("Failed to read battery INA260: %d", err);
+			LOG_WRN("Failed to read averaged battery INA260 values: %d", err);
+			/* Publish cycle every 60 seconds */
+			k_msleep(60000);
+			continue;
 		}
+		LOG_INF("Battery INA260 avg (%u samples) -> V=%.6fV I=%.6fA P=%.6fW",
+			ina_samples, battery_v, battery_current_a, battery_power_w);
 
 		/* Compute battery SoC from INA260 bus voltage. */
 		int soc = (battery_v >= BATT_FULL_VOLTAGE_V) ? 100 : battery_soc_from_voltage(battery_v);
@@ -560,9 +512,8 @@ void solar_mqtt_init(void)
 	client.will_retain = 1;
 
 	k_sem_init(&scan_sem, 0, 1);
-
-	if (!device_is_ready(dev_battery_ina)) {
-		LOG_ERR("battery INA260 sensor not ready");
+	if (ina_sensor_init() < 0) {
+		LOG_ERR("INA sensor init failed");
 	}
 
 	dht_sensor_init();
