@@ -41,6 +41,11 @@ In VS Code, use `Ctrl+Shift+B` or **Terminal → Run Task** to access:
    - Opens serial monitor; press `Ctrl+]` to exit
    - Adjust `COM5` in `tasks.json` if your device port differs
 
+5. **Zephyr: Build OTA ESP32 ProCPU (pristine)** — builds MCUboot and the signed application image
+6. **Zephyr: Flash OTA ESP32 ProCPU** — performs the one-time MCUboot installation over USB
+7. **OTA: Upload, Test, and Reset** — uploads, tests, and reboots into the candidate OTA image
+8. **OTA: Confirm Active Image** — permanently confirms the current image
+
 ### Build Artifacts
 
 | File | Purpose |
@@ -98,12 +103,17 @@ solar-node/
 ## Agent Best Practices
 
 1. **Always use VS Code tasks for building** — tasks set up `.venv` and cwd correctly
-2. **Pristine build required after:** `prj.conf` changes, `app.overlay` changes, new modules added to `CMakeLists.txt`
-3. **Standard build is sufficient for:** changes to `.c` / `.cpp` / `.h` files only
-4. **When adding a new module:** create `src/name.h` + `src/name.c`, add `src/name.c` to `CMakeLists.txt`, use `#ifndef` include guards
-5. **Zephyr logging:** use `LOG_MODULE_REGISTER(name, LOG_LEVEL_INF)` per file; use `LOG_INF` / `LOG_WRN` / `LOG_ERR`
-6. **Code style:** C (not C++) for all new source files; `main.cpp` is the only C++ file and exists because Zephyr requires it for C++ linkage setup
-7. **After flash:** run Monitor Serial task to validate logs; look for `=== Solar Node Starting ===` then WiFi and MQTT connection confirmation
+2. **Virtual environment PATH is required** — `.venv\Scripts` contains `west.exe`, `esptool.exe`, `python.exe`, and other ESP32 build tools. Project tasks prepend `${workspaceFolder}\.venv\Scripts` to `PATH`. When running an equivalent command outside a VS Code task, use PowerShell:
+   ```powershell
+   $env:PATH="$PWD\.venv\Scripts;$env:PATH"
+   ```
+   A `esptool>=5.0.2 not found in PATH` CMake error means esptool is likely installed but `.venv\Scripts` was omitted from `PATH`.
+3. **Pristine build required after:** `prj.conf`, `sysbuild.conf`, or `app.overlay` changes, and after adding modules to `CMakeLists.txt`
+4. **Standard build is sufficient for:** changes to `.c` / `.cpp` / `.h` files only
+5. **When adding a new module:** create `src/name.h` + `src/name.c`, add `src/name.c` to `CMakeLists.txt`, use `#ifndef` include guards
+6. **Zephyr logging:** use `LOG_MODULE_REGISTER(name, LOG_LEVEL_INF)` per file; use `LOG_INF` / `LOG_WRN` / `LOG_ERR`
+7. **Code style:** C (not C++) for all new source files; `main.cpp` is the only C++ file and exists because Zephyr requires it for C++ linkage setup
+8. **After flash:** run Monitor Serial task to validate logs; look for `=== Solar Node Starting ===` then WiFi and MQTT connection confirmation
 
 ---
 
@@ -241,34 +251,42 @@ Note: SoC accuracy is best on resting open-circuit voltage. Readings reflect "Ch
 
 ---
 
-### Phase 4 — OTA Firmware Updates (MCUmgr SMP over TCP/IP)
+### Phase 4 — OTA Firmware Updates (MCUmgr SMP over UDP)
 **Goal:** Fully wireless firmware updates from VS Code terminal. The ESP32 serves update requests on port 1337 over WiFi — no external HTTP server needed.
 
 **This phase requires one wired flash to install the updated partition layout and MCUboot. After that, all future updates are wireless.**
 
 **Checklist:**
-- [ ] Add to `prj.conf`:
-  ```
-  CONFIG_BOOTLOADER_MCUBOOT=y
-  CONFIG_IMG_MANAGER=y
-  CONFIG_MCUMGR=y
-  CONFIG_MCUMGR_TRANSPORT_TCP=y
-  CONFIG_SMP_SERVER=y
-  CONFIG_ZCBOR=y
-  CONFIG_MCUMGR_GRP_IMG=y
-  CONFIG_MCUMGR_GRP_OS=y
-  ```
-- [ ] Create a dual-bank partition map (primary + secondary app slots). Check Zephyr ESP32 MCUboot samples for the correct `boards/` overlay or `pm_static.yml` format
-- [ ] Pristine build + wired flash (first time only, to install MCUboot + new partition layout)
-- [ ] Install `mcumgr` CLI: `pip install mcumgr` or via Go: `go install github.com/apache/mynewt-mcumgr-cli/mcumgr@latest`
-- [ ] Add VS Code task "OTA: Upload Firmware via MCUmgr" to `.vscode/tasks.json`:
-  ```
-  mcumgr --conntype tcp --connstring "addr=<ESP_IP>,port=1337" image upload build/zephyr/zephyr.signed.bin
-  mcumgr --conntype tcp --connstring "addr=<ESP_IP>,port=1337" image test <hash>
-  mcumgr --conntype tcp --connstring "addr=<ESP_IP>,port=1337" os reset
-  ```
-  The ESP IP is shown in serial monitor logs on boot, or via your router's DHCP table.
-- [ ] Test rollback: upload firmware with a distinct log string, confirm boot, then verify MCUboot reverts on a bad image
+- [x] Enable MCUmgr image/OS groups and the Zephyr UDP SMP transport in `prj.conf`
+- [x] Enable MCUboot through `sysbuild.conf`
+- [x] Verify the ESP32 board partition table contains primary and secondary application slots
+- [x] Add OTA build and initial wired-flash tasks
+- [x] Implement the Python UDP OTA utility in `scripts/ota.py`
+- [x] Verify wired MCUboot installation
+- [x] Verify UDP upload, test reset, boot, and Wi-Fi/MQTT recovery
+- [x] Verify image confirmation
+- [ ] Add automatic application-side image confirmation after a stable boot if desired
+
+**Important:** Zephyr 4.4 uses `CONFIG_MCUMGR_TRANSPORT_UDP=y`; it does not provide `CONFIG_MCUMGR_TRANSPORT_TCP=y`. OTA operations use `scripts/ota.py` and the `smpclient` Python package inside `.venv`; no Go or external MCUmgr executable is required.
+
+**OTA files:**
+- Signed application image: `build/solar-node/zephyr/zephyr.signed.bin`
+- MCUboot image: `build/mcuboot/zephyr/zephyr.bin`
+- UDP SMP port: `1337`
+- Python OTA utility: `scripts/ota.py`
+
+**OTA sequence:**
+1. Run `Zephyr: Build OTA ESP32 ProCPU (pristine)` after firmware changes.
+2. Run `OTA: Upload, Test, and Reset`, providing the ESP32 IPv4 address.
+3. Verify Wi-Fi, MQTT, sensors, and switch control after reboot.
+4. Run `OTA: Confirm Active Image`; otherwise MCUboot may roll back after another reset.
+
+**Virtual environment:** OTA build tasks put `.venv\Scripts` on `PATH`. A manual build should also do this:
+```powershell
+$env:PATH="$PWD\.venv\Scripts;$env:PATH"
+```
+
+The ESP32 IP is shown in serial monitor logs on boot or can be found through the router DHCP table.
 
 **Verification:** Upload a firmware change wirelessly; device reboots to new firmware; MQTT telemetry resumes in HA; MCUboot reverts to previous slot if new image fails to confirm
 
@@ -285,10 +303,13 @@ Note: SoC accuracy is best on resting open-circuit voltage. Readings reflect "Ch
 | Change credentials | `settings set wifi/ssid "X"` via shell (Phase 0+); or edit `src/config.h` and rebuild |
 | Add source file | Create `src/name.{h,c}`, add `src/name.c` to `CMakeLists.txt`, pristine rebuild |
 | Check memory | Review `Memory region` table in build output |
-| OTA update | See Phase 4 mcumgr task (after Phase 4 is implemented) |
+| OTA build | Run `Zephyr: Build OTA ESP32 ProCPU (pristine)` |
+| OTA wired flash | Run `Zephyr: Flash OTA ESP32 ProCPU` once for MCUboot |
+| OTA upload/test/reset | Run `OTA: Upload, Test, and Reset` |
+| OTA confirm | Run `OTA: Confirm Active Image` |
 
 ---
 
-**Last Updated:** 2026-10-07
+**Last Updated:** 2026-11-20
 **Working Features:** WiFi auto-connect, battery INA260 telemetry (Battery Voltage, Battery Current, Battery Power, Battery SoC), MQTT telemetry, HA auto-discovery (Battery sensors, RSSI, Temperature, Humidity, Lights switch), MOSFET switch (IO32/Pwr3) via MQTT + shell regulator
-**Next Phase:** Phase 4 — OTA Firmware Updates (MCUmgr SMP over TCP/IP)
+**Next Phase:** OTA automatic confirmation or future solar telemetry
